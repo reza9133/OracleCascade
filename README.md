@@ -1,5 +1,21 @@
 # OracleCascade
 
+OracleCascade is a three-contract chain on GenLayer, each deployed on top
+of the address of the one before it. EventOracle lets anyone open a claim
+about a real-world event with 2-8 possible outcomes and a source URL;
+after a deadline, validators independently read that page and reach AI
+consensus on which outcome the evidence supports. PredictionPool, built on
+EventOracle's address, turns each resolved claim into a pari-mutuel
+market: stakers back an outcome with GEN, and winners pull a payout
+funded by the losing side, minus a small platform fee, once resolved.
+ForecasterRank, built on PredictionPool's address, grants live
+reputation-tier badges (SCOUT/SHARP/VETERAN/ORACLE) computed straight from
+each forecaster's real win record -- never faked, never admin-revocable.
+The only payable method never reverts, refunding instead, and a
+grace-period safety valve stops an unresolved claim from trapping GEN
+forever. Ships with 81 passing tests, validated against GenLayer's
+official linter.
+
 Three GenLayer Intelligent Contracts, deployed one after another, each one
 built directly on top of the address of the one before it:
 
@@ -257,6 +273,30 @@ Each one reports `✓ Lint passed` (fast AST safety checks) *and*
 GenVM Python runtime) -- this is not merely `ast`-clean, it is checked
 against the actual GenVM SDK types and decorators.
 
+## Deployed on Studionet
+
+A live instance of the full chain is already running on Studionet:
+
+| Contract | Address |
+|---|---|
+| `EventOracle` | `0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113` |
+| `PredictionPool` | `0xa2140495FE18Ca31b7f2CABFCc5175f4a1049097` |
+| `ForecasterRank` | `0x93e928Ae4aF682635576B07A895A832eAcFD18b6` |
+
+These are recorded here as deployed, not independently re-verified by
+whatever produced this README -- confirm them yourself before relying on
+them, e.g.:
+
+```bash
+genlayer network set studionet
+genlayer call 0xa2140495FE18Ca31b7f2CABFCc5175f4a1049097 get_config
+# should report this same oracle address for EventOracle
+```
+
+`get_config()` on `PredictionPool` and `ForecasterRank` each report which
+upstream address they were actually constructed with, so this single call
+confirms the whole chain is wired the way the table above claims.
+
 ## Deploying to Studionet
 
 Deploy in order, and hand each printed address to the next constructor --
@@ -285,6 +325,16 @@ argument when deploying `PredictionPool.py`, then repeat for
 `ForecasterRank.py` with `PredictionPool`'s address.
 
 ### Trying it end to end
+
+Point the same three environment variables at the already-deployed
+instance above instead of a fresh deployment if you just want to interact
+with it:
+
+```bash
+export EVENT_ORACLE=0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113
+export PREDICTION_POOL=0xa2140495FE18Ca31b7f2CABFCc5175f4a1049097
+export FORECASTER_RANK=0x93e928Ae4aF682635576B07A895A832eAcFD18b6
+```
 
 ```bash
 # open a claim, at least 60 seconds (MIN_LEAD_SECONDS) in the future
