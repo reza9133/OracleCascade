@@ -58,10 +58,20 @@ import json
 # is the only one that can ever receive GEN it did not ask for. It must
 # NEVER raise -- `gl.vm.UserError` rolls back storage but not the value that
 # rode in with the call. Every rejection therefore refunds the sender and
-# returns `{"ok": false, ...}` instead of raising. settle_pool() and
+# returns `{"ok": false, ...}` instead of raising. That guarantee has to
+# hold even when the failure originates OUTSIDE this file: every EventOracle
+# view() call _stake_problem() makes (status, deadline, outcome validity)
+# goes through _try_oracle(), which turns any exception the oracle raises --
+# an unreachable address, a reverted view method, a repointed oracle that
+# doesn't even implement these methods -- into an ordinary rejection string
+# instead of letting it escape stake() itself. A static check of this file's
+# own AST (test_no_raise_in_payable.py) cannot see that risk, because the
+# exception would come from a different contract's code, not this one's --
+# which is exactly why it needs its own explicit handling and its own test
+# (test_stake_refunds_when_oracle_view_call_raises). settle_pool() and
 # claim_payout() carry no value, so -- exactly like EventOracle.resolve_claim
-# -- they are free to raise on genuine errors; a reverted call there simply
-# costs nothing and can be retried.
+# -- they are free to raise on genuine errors, oracle-originated or not; a
+# reverted call there simply costs nothing and can be retried.
 #
 # Two-sided "nobody gets trapped" guarantee:
 #   - a claim that IS resolved settles normally;
@@ -222,6 +232,21 @@ class PredictionPool(gl.Contract):
 	def _oracle(self):
 		return _EventOracle(self.oracle)
 
+	def _try_oracle(self, step: str, fn):
+		"""Calls a zero-argument closure that performs exactly one
+		EventOracle view() call, and turns ANY exception it raises --
+		gl.vm.UserError, gl.vm.VMError, or anything else an unreachable,
+		broken, or maliciously repointed oracle might throw -- into a
+		(False, reason) pair instead of letting it escape. stake() is
+		payable, so anything that reaches its caller as a raised exception
+		would revert with the sender's attached GEN never refunded; routing
+		every oracle read through this is what keeps that impossible no
+		matter how badly `self.oracle` misbehaves."""
+		try:
+			return True, fn()
+		except Exception as e:
+			return False, step + " failed: " + str(getattr(e, "message", e))[:150]
+
 	def _pay(self, to, amount: int) -> None:
 		if amount <= 0:
 			return
@@ -245,11 +270,21 @@ class PredictionPool(gl.Contract):
 		if len(o) == 0 or len(o) > MAX_OUTCOME_LABEL_LEN:
 			return "outcome label must be 1.." + str(MAX_OUTCOME_LABEL_LEN) + " characters"
 
-		status = self._oracle().view().get_claim_status(int(claim_id))
+		# Every upstream EventOracle read below goes through _try_oracle():
+		# stake() is the payable method in this chain, so a broken,
+		# unreachable, or repointed oracle must turn into an ordinary
+		# rejection-with-refund here, never a raised exception.
+		ok, status = self._try_oracle("checking claim status",
+			lambda: self._oracle().view().get_claim_status(int(claim_id)))
+		if not ok:
+			return status
 		if status != "OPEN":
 			return "the underlying claim is " + str(status) + ", not open for staking"
 
-		deadline = self._oracle().view().get_deadline(int(claim_id))
+		ok, deadline = self._try_oracle("checking claim deadline",
+			lambda: self._oracle().view().get_deadline(int(claim_id)))
+		if not ok:
+			return deadline
 		if now >= int(deadline):
 			return "staking closed: the claim's deadline has passed"
 
@@ -260,7 +295,11 @@ class PredictionPool(gl.Contract):
 		# real winners at that staker's expense. Checked case-insensitively,
 		# matching EventOracle's own case-insensitive uniqueness rule at
 		# claim-creation time.
-		if not self._oracle().view().is_valid_outcome(int(claim_id), o):
+		ok, valid = self._try_oracle("validating outcome",
+			lambda: self._oracle().view().is_valid_outcome(int(claim_id), o))
+		if not ok:
+			return valid
+		if not valid:
 			return "'" + o + "' is not one of this claim's configured outcome labels"
 
 		existing = self.stakes.get(_skey(claim_id, sender))
