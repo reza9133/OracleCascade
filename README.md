@@ -142,9 +142,21 @@ fails the build if `stake()` ever gains a `raise`, or if any *other* method
 in the chain is ever marked payable without that same guarantee being
 re-derived for it.
 
+That guarantee has to survive a misbehaving *dependency*, not just
+misbehaving *input* -- an AST check of this file alone cannot prove that,
+since the failure would come from a different contract's code. Every
+EventOracle view() call `_stake_problem()` makes (status, deadline, outcome
+validity) is wrapped by `_try_oracle()`, which turns any exception the
+oracle raises -- unreachable address, a reverted view method, an owner
+having repointed `oracle` at something that does not even implement these
+methods -- into an ordinary rejection string instead of letting it escape
+`stake()`. `test/test_prediction_pool.py` proves this with a fake oracle
+whose view calls can be told to raise on command
+(`test_stake_refunds_when_oracle_*_view_call_raises`).
+
 `settle_pool()` and `claim_payout()` carry no value, so -- exactly like
-`EventOracle.resolve_claim()` -- they are free to raise on a genuine error;
-nothing is lost when they revert.
+`EventOracle.resolve_claim()` -- they are free to raise on a genuine error,
+oracle-originated or not; nothing is lost when they revert.
 
 **Two-sided "nobody gets trapped" guarantee.** A resolved claim settles
 normally. A claim that gets `CANCELED` in `EventOracle` voids the pool, and
@@ -239,7 +251,7 @@ exercise the real shipped contract logic directly.
 python3 -m unittest discover -s test -v
 ```
 
-81 tests, no real network calls, no real `time.sleep` (deadlines are
+85 tests, no real network calls, no real `time.sleep` (deadlines are
 crossed by monkeypatching each module's own `_now_epoch()`, not by
 waiting). Coverage includes every validation rule in `create_claim`, the
 `OPEN -> RESOLVED / INCONCLUSIVE -> RESOLVED` retry path, both
@@ -248,16 +260,17 @@ exact pari-mutuel arithmetic checked against hand-computed numbers (not
 just re-derived from the contract's own formula), the `SETTLED` /
 `VOID` / grace-period paths, and the live-eligibility-vs-badge-record
 distinction in `ForecasterRank`. It also includes targeted regression
-tests for three bugs an earlier version of `PredictionPool.py` had --
+tests for four issues earlier versions of `PredictionPool.py` had --
 platform fees that could never actually be swept because `pool_locked`
 was never reduced by the fee at settlement, a stake accepted on an
-outcome label the claim never offered, and a stake recorded in a
-different case than the outcome it was later compared against at
-payout time -- each written so it demonstrably fails against the old,
-buggy code and passes against the fix (see the inline comments next to
-`_canon_outcome()`, `is_valid_outcome()`, and the `pool_locked` line in
-`settle_pool()` for the reasoning). The platform-fee sweep delay is
-covered too.
+outcome label the claim never offered, a stake recorded in a different
+case than the outcome it was later compared against at payout time, and
+a raising upstream oracle view call escaping `stake()` before the
+sender's GEN was refunded -- each written so it demonstrably fails
+against the old, buggy code and passes against the fix (see the inline
+comments next to `_canon_outcome()`, `is_valid_outcome()`, `_try_oracle()`,
+and the `pool_locked` line in `settle_pool()` for the reasoning). The
+platform-fee sweep delay is covered too.
 
 The three contract files also pass the real, official linter end to end:
 
@@ -275,27 +288,72 @@ against the actual GenVM SDK types and decorators.
 
 ## Deployed on Studionet
 
-A live instance of the full chain is already running on Studionet:
+A live instance of the full chain has been deployed on Studionet:
 
-| Contract | Address |
-|---|---|
-| `EventOracle` | `0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113` |
-| `PredictionPool` | `0xa2140495FE18Ca31b7f2CABFCc5175f4a1049097` |
-| `ForecasterRank` | `0x93e928Ae4aF682635576B07A895A832eAcFD18b6` |
+| Contract | Address | Source has changed since this project began? |
+|---|---|---|
+| `EventOracle` | `0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113` | yes, once -- gained `is_valid_outcome()` |
+| `PredictionPool` | `0xa2140495FE18Ca31b7f2CABFCc5175f4a1049097` | **yes, twice -- see below** |
+| `ForecasterRank` | `0x93e928Ae4aF682635576B07A895A832eAcFD18b6` | no |
 
-These are recorded here as deployed, not independently re-verified by
-whatever produced this README -- confirm them yourself before relying on
-them, e.g.:
+These addresses are recorded here as given, not independently verified --
+nothing available to whatever produced this README can query Studionet, so
+there is no way to confirm from here which version of the source was
+actually live at deploy time for any of the three. Confirm before relying
+on them:
 
 ```bash
 genlayer network set studionet
+
+# does the deployed EventOracle have is_valid_outcome() at all? An
+# instance deployed before that method existed will error on this call
+# instead of returning a bool.
+genlayer call 0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113 is_valid_outcome --args 1 "X"
+
+# does PredictionPool still point at that same EventOracle?
 genlayer call 0xa2140495FE18Ca31b7f2CABFCc5175f4a1049097 get_config
-# should report this same oracle address for EventOracle
+# does ForecasterRank still point at that same PredictionPool?
+genlayer call 0x93e928Ae4aF682635576B07A895A832eAcFD18b6 get_config
 ```
 
-`get_config()` on `PredictionPool` and `ForecasterRank` each report which
-upstream address they were actually constructed with, so this single call
-confirms the whole chain is wired the way the table above claims.
+**`PredictionPool` needs to be redeployed regardless of which prior
+version was live.** Its source in this repository now includes the
+`stake()` oracle-failure fix described above, which did not exist anywhere
+until this update, so no previously-deployed instance can have it.
+Intelligent Contracts are immutable once deployed -- this repository sets
+up no upgrade path (see
+[Upgradability](https://docs.genlayer.com/developers/intelligent-contracts/features/upgradability))
+-- so there is no way to patch the existing address in place; a fixed
+`PredictionPool` can only exist at a new address. `ForecasterRank`'s own
+source has not changed and does not need redeploying, only repointing at
+the new pool. If the `is_valid_outcome()` probe above fails, `EventOracle`
+predates that method too and should be redeployed alongside it.
+
+```bash
+genlayer network set studionet
+
+# deploy the fixed PredictionPool, pointed at the SAME, already-live
+# EventOracle -- no need to touch EventOracle at all, unless the probe
+# above showed it also needs redeploying
+genlayer deploy --contract contracts/PredictionPool.py \
+  --args 0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113 300
+# -> note the new printed address, e.g. NEW_PREDICTION_POOL=0x...
+
+# repoint the EXISTING ForecasterRank at the new pool instead of
+# redeploying it too -- set_oracle() is exactly what it's for
+genlayer write 0x93e928Ae4aF682635576B07A895A832eAcFD18b6 set_oracle \
+  --args "$NEW_PREDICTION_POOL"
+```
+
+This repository has no way to know what, if anything, is already staked on
+the old `PredictionPool` address, or whether that instance also still
+carries the fee-lock, outcome-validation, or case-sensitivity issues fixed
+earlier in this project's history -- that depends on exactly which version
+was live when it was deployed, which nothing here can check. Treat the old
+address as retired rather than assuming its `settle_pool()` /
+`claim_payout()` behave like the current source; point people at the new
+address for anything going forward, and once
+`genlayer call 0x93e928... get_config` reports it, update the table above.
 
 ## Deploying to Studionet
 

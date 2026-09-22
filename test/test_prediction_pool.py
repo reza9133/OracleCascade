@@ -49,14 +49,25 @@ class _FakeOracle:
 		self.deadline = {}
 		self.winner = {}
 		self.outcomes = {}
+		# Method names in here raise a plain Exception instead of answering,
+		# simulating an unreachable, broken, or misbehaving upstream oracle
+		# -- exactly the dependency-failure scenario stake() has to survive
+		# without ever letting the sender's attached GEN go unrefunded.
+		self.raise_on = set()
 
 	def view(self):
 		return self
 
+	def _maybe_raise(self, method_name: str) -> None:
+		if method_name in self.raise_on:
+			raise RuntimeError("simulated upstream oracle outage in " + method_name)
+
 	def get_claim_status(self, claim_id: int) -> str:
+		self._maybe_raise("get_claim_status")
 		return self.status.get(int(claim_id), "UNKNOWN")
 
 	def get_deadline(self, claim_id: int) -> int:
+		self._maybe_raise("get_deadline")
 		return self.deadline.get(int(claim_id), 0)
 
 	def is_resolved(self, claim_id: int) -> bool:
@@ -66,6 +77,7 @@ class _FakeOracle:
 		return self.winner.get(int(claim_id), "")
 
 	def is_valid_outcome(self, claim_id: int, outcome: str) -> bool:
+		self._maybe_raise("is_valid_outcome")
 		configured = self.outcomes.get(int(claim_id), [])
 		target = str(outcome).strip().upper()
 		return any(target == str(label).strip().upper() for label in configured)
@@ -148,6 +160,54 @@ class PredictionPoolTestCase(unittest.TestCase):
 		res = json.loads(self.pool.stake(CLAIM_ID, "ALICE"))
 		self.assertFalse(res["ok"])
 		self.assertEqual(stub.PAYMENTS, [(str(ALICE_STAKER), 2 * GEN)])
+
+	# ------------------------------------------------------------------ #
+	# stake() must survive a misbehaving upstream oracle -- a broken,
+	# unreachable, or maliciously repointed EventOracle is a dependency
+	# failure, not a validation failure, but the money-safety guarantee has
+	# to hold regardless of which one caused the rejection.
+	# ------------------------------------------------------------------ #
+
+	def test_stake_refunds_when_oracle_status_view_call_raises(self):
+		self.oracle.raise_on.add("get_claim_status")
+		send_as(ALICE_STAKER, 2 * GEN)
+		res = json.loads(self.pool.stake(CLAIM_ID, "ALICE"))
+		self.assertFalse(res["ok"])
+		self.assertIn("checking claim status failed", res["reason"])
+		self.assertEqual(stub.PAYMENTS, [(str(ALICE_STAKER), 2 * GEN)])
+		# no money should have moved into the pool either
+		pool = json.loads(self.pool.get_pool(CLAIM_ID))
+		self.assertEqual(pool["total_staked"], "0")
+
+	def test_stake_refunds_when_oracle_deadline_view_call_raises(self):
+		self.oracle.raise_on.add("get_deadline")
+		send_as(ALICE_STAKER, 2 * GEN)
+		res = json.loads(self.pool.stake(CLAIM_ID, "ALICE"))
+		self.assertFalse(res["ok"])
+		self.assertIn("checking claim deadline failed", res["reason"])
+		self.assertEqual(stub.PAYMENTS, [(str(ALICE_STAKER), 2 * GEN)])
+
+	def test_stake_refunds_when_oracle_outcome_validation_view_call_raises(self):
+		self.oracle.raise_on.add("is_valid_outcome")
+		send_as(ALICE_STAKER, 2 * GEN)
+		res = json.loads(self.pool.stake(CLAIM_ID, "ALICE"))
+		self.assertFalse(res["ok"])
+		self.assertIn("validating outcome failed", res["reason"])
+		self.assertEqual(stub.PAYMENTS, [(str(ALICE_STAKER), 2 * GEN)])
+
+	def test_stake_still_works_normally_once_the_oracle_recovers(self):
+		"""The failure has to be transient-safe too: rejecting and
+		refunding must not leave the pool or the stake records in some
+		half-written state that blocks a later, successful retry."""
+		self.oracle.raise_on.add("get_claim_status")
+		send_as(ALICE_STAKER, 2 * GEN)
+		failed = json.loads(self.pool.stake(CLAIM_ID, "ALICE"))
+		self.assertFalse(failed["ok"])
+
+		self.oracle.raise_on.discard("get_claim_status")
+		res = json.loads(self.pool.stake(CLAIM_ID, "ALICE"))
+		self.assertTrue(res["ok"])
+		self.assertEqual(res["total_stake"], str(2 * GEN))
 
 	# ------------------------------------------------------------------ #
 	# settle_pool
