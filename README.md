@@ -288,72 +288,43 @@ against the actual GenVM SDK types and decorators.
 
 ## Deployed on Studionet
 
-A live instance of the full chain has been deployed on Studionet:
+A live instance of the full chain, including the `stake()` oracle-failure
+fix described above, is deployed on Studionet:
 
-| Contract | Address | Source has changed since this project began? |
-|---|---|---|
-| `EventOracle` | `0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113` | yes, once -- gained `is_valid_outcome()` |
-| `PredictionPool` | `0xa2140495FE18Ca31b7f2CABFCc5175f4a1049097` | **yes, twice -- see below** |
-| `ForecasterRank` | `0x93e928Ae4aF682635576B07A895A832eAcFD18b6` | no |
+| Contract | Address |
+|---|---|
+| `EventOracle` | `0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113` |
+| `PredictionPool` | `0x9eEC9e2Fac1fB6a37C25A2bA60f3F1C350A6d90f` |
+| `ForecasterRank` | `0x82Fc56a730596Bf1B94345027EE0cCe6FAB7dAb3` |
+
+`EventOracle`'s address is unchanged from earlier in this project;
+`PredictionPool` and `ForecasterRank` were both redeployed fresh so that
+every method on all three, including `stake()`'s new oracle-failure
+handling, matches the source in this repository -- Intelligent Contracts
+are immutable once deployed and this project sets up no upgrade path, so a
+source change can only ever show up at a new address, never by patching an
+old one in place (see
+[Upgradability](https://docs.genlayer.com/developers/intelligent-contracts/features/upgradability)).
 
 These addresses are recorded here as given, not independently verified --
 nothing available to whatever produced this README can query Studionet, so
-there is no way to confirm from here which version of the source was
-actually live at deploy time for any of the three. Confirm before relying
-on them:
+confirm the wiring yourself before relying on it:
 
 ```bash
 genlayer network set studionet
-
-# does the deployed EventOracle have is_valid_outcome() at all? An
-# instance deployed before that method existed will error on this call
-# instead of returning a bool.
-genlayer call 0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113 is_valid_outcome --args 1 "X"
-
-# does PredictionPool still point at that same EventOracle?
-genlayer call 0xa2140495FE18Ca31b7f2CABFCc5175f4a1049097 get_config
-# does ForecasterRank still point at that same PredictionPool?
-genlayer call 0x93e928Ae4aF682635576B07A895A832eAcFD18b6 get_config
+genlayer call 0x9eEC9e2Fac1fB6a37C25A2bA60f3F1C350A6d90f get_config
+# should report the EventOracle address above
+genlayer call 0x82Fc56a730596Bf1B94345027EE0cCe6FAB7dAb3 get_config
+# should report the PredictionPool address above
 ```
 
-**`PredictionPool` needs to be redeployed regardless of which prior
-version was live.** Its source in this repository now includes the
-`stake()` oracle-failure fix described above, which did not exist anywhere
-until this update, so no previously-deployed instance can have it.
-Intelligent Contracts are immutable once deployed -- this repository sets
-up no upgrade path (see
-[Upgradability](https://docs.genlayer.com/developers/intelligent-contracts/features/upgradability))
--- so there is no way to patch the existing address in place; a fixed
-`PredictionPool` can only exist at a new address. `ForecasterRank`'s own
-source has not changed and does not need redeploying, only repointing at
-the new pool. If the `is_valid_outcome()` probe above fails, `EventOracle`
-predates that method too and should be redeployed alongside it.
-
-```bash
-genlayer network set studionet
-
-# deploy the fixed PredictionPool, pointed at the SAME, already-live
-# EventOracle -- no need to touch EventOracle at all, unless the probe
-# above showed it also needs redeploying
-genlayer deploy --contract contracts/PredictionPool.py \
-  --args 0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113 300
-# -> note the new printed address, e.g. NEW_PREDICTION_POOL=0x...
-
-# repoint the EXISTING ForecasterRank at the new pool instead of
-# redeploying it too -- set_oracle() is exactly what it's for
-genlayer write 0x93e928Ae4aF682635576B07A895A832eAcFD18b6 set_oracle \
-  --args "$NEW_PREDICTION_POOL"
-```
-
-This repository has no way to know what, if anything, is already staked on
-the old `PredictionPool` address, or whether that instance also still
-carries the fee-lock, outcome-validation, or case-sensitivity issues fixed
-earlier in this project's history -- that depends on exactly which version
-was live when it was deployed, which nothing here can check. Treat the old
-address as retired rather than assuming its `settle_pool()` /
-`claim_payout()` behave like the current source; point people at the new
-address for anything going forward, and once
-`genlayer call 0x93e928... get_config` reports it, update the table above.
+Two earlier addresses for this chain,
+`PredictionPool` at `0xa2140495FE18Ca31b7f2CABFCc5175f4a1049097` and
+`ForecasterRank` at `0x93e928Ae4aF682635576B07A895A832eAcFD18b6`, predate
+this fix (and, depending on exactly when each was deployed, possibly the
+fee-lock, outcome-validation, or case-sensitivity fixes from earlier in
+this project's history too) and are superseded by the pair above. Treat
+them as retired rather than assuming they behave like the current source.
 
 ## Deploying to Studionet
 
@@ -390,8 +361,8 @@ with it:
 
 ```bash
 export EVENT_ORACLE=0xf0a02Fb3F4E5533CB0805e22DC0C1c1DfF5af113
-export PREDICTION_POOL=0xa2140495FE18Ca31b7f2CABFCc5175f4a1049097
-export FORECASTER_RANK=0x93e928Ae4aF682635576B07A895A832eAcFD18b6
+export PREDICTION_POOL=0x9eEC9e2Fac1fB6a37C25A2bA60f3F1C350A6d90f
+export FORECASTER_RANK=0x82Fc56a730596Bf1B94345027EE0cCe6FAB7dAb3
 ```
 
 ```bash
